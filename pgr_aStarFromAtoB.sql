@@ -67,3 +67,10 @@ BEGIN
 END;
 $BODY$
 LANGUAGE 'plpgsql' VOLATILE STRICT;
+
+--In order to use this function
+--SELECT geom FROM pgr_aStarFromAtoB('ways', 28.231233, 41.324324, 29.432432, 42.423542)
+--SELECT cost FROM pgr_aStarFromAtoB('ways', 28.231233, 41.324324, 29.432432, 42.423542)
+--etc etc 
+--In GeoServer, we make an SQL View like the following
+--SELECT geom FROM pgr_aStarFromAtoB('ways', %x1%, %y1%, %x2%, %y2%) ORDER BY seq
