@@ -22,7 +22,7 @@ DECLARE
         rec     record;
         source	integer;
         target	integer;
-        --point	integer;
+        point	integer;
         
 BEGIN
 	-- Find nearest node
