@@ -1,0 +1,70 @@
+CREATE OR REPLACE FUNCTION pgr_aDijkstraFromAtoB(
+                IN tbl varchar,
+                IN st_x double precision,
+                IN st_y double precision,
+                IN end_x double precision,
+                IN end_y double precision,
+                OUT seq integer,
+                OUT node integer,
+                OUT edge integer,
+                OUT heading double precision,
+                OUT cost double precision,
+                OUT geom geometry
+        )
+        RETURNS SETOF record AS
+$BODY$
+DECLARE
+        sql     text;
+        rec     record;
+        source	integer;
+        target	integer;
+        --point	integer;
+        
+BEGIN
+	-- Find nearest node
+	EXECUTE 'SELECT id::integer FROM ways_vertices_pgr 
+			ORDER BY the_geom <-> ST_GeometryFromText(''POINT(' 
+			|| st_x || ' ' || st_y || ')'',4326) LIMIT 1' INTO rec;
+	source := rec.id;
+	
+	EXECUTE 'SELECT id::integer FROM ways_vertices_pgr 
+			ORDER BY the_geom <-> ST_GeometryFromText(''POINT(' 
+			|| end_x || ' ' || end_y || ')'',4326) LIMIT 1' INTO rec;
+	target := rec.id;
+	
+	-- Shortest path query (TODO: limit extent by BBOX) 
+        seq := 0;
+        
+        sql := 'SELECT seq, id1 AS node, id2 AS edge, cost, the_geom FROM ' ||
+                        'pgr_dijkstra(''SELECT id, source, target, st_length(the_geom) as cost FROM '
+                                        || quote_ident(tbl) || ''', '
+                                        || source || ', ' || target 
+                                        || ' , false, false) as pgr JOIN '
+                                || quote_ident(tbl) || ' pt ON pgr.id2 = pt.id';
+
+                               
+                        
+ 
+	-- Remember start point
+        --point := source;
+	
+        FOR rec IN EXECUTE sql
+        LOOP
+		
+		-- Return record
+                seq     := seq + 1;
+                node     := rec.node;
+                edge    := rec.edge;
+                cost    := rec.cost;
+                geom    := rec.the_geom;
+           
+                RETURN NEXT;
+                
+        END LOOP;
+        RETURN;
+	
+END;
+$BODY$
+LANGUAGE 'plpgsql' VOLATILE STRICT;
+
+-- SELECT geom into test2 FROM pgr_aDijkstraFromAtoB('ways', 8.677841, 50.1231, 8.683957, 50.125071)
