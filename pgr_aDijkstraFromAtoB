@@ -195,3 +195,196 @@ BEGIN
 END;
 $BODY$
 LANGUAGE plpgsql VOLATILE STRICT;
+- At a time node, you can jump to the same node at a different time (forward or backward). We might have multiple copies of the graph for different time slices.To enhance the function to include vector wormholes (parallel paths) and time travel (jumping forward/backward in time), we need to modify the routing logic to handle:
+1. **Wormholes**: Instantaneous connections between distant points (cost=0)
+2. **Time Travel**: Nodes that allow temporal jumps (forward/backward with associated time costs)
+
+Here's the updated function:
+
+```sql
+CREATE OR REPLACE FUNCTION pgr_aDijkstraFromAtoB(
+    IN tbl VARCHAR,
+    IN st_x DOUBLE PRECISION,
+    IN st_y DOUBLE PRECISION,
+    IN end_x DOUBLE PRECISION,
+    IN end_y DOUBLE PRECISION,
+    IN wormholes_table VARCHAR DEFAULT NULL,
+    IN time_nodes_table VARCHAR DEFAULT NULL,
+    OUT seq INTEGER,
+    OUT node INTEGER,
+    OUT edge INTEGER,
+    OUT heading DOUBLE PRECISION,
+    OUT cost DOUBLE PRECISION,
+    OUT geom GEOMETRY,
+    OUT travel_time INTERVAL
+) RETURNS SETOF RECORD AS
+$BODY$
+DECLARE
+    sql TEXT;
+    rec RECORD;
+    source INTEGER;
+    target INTEGER;
+    graph_sql TEXT;
+    geom_sql TEXT;
+    time_travel_sql TEXT;
+BEGIN
+    -- Find nearest node to start point
+    EXECUTE '
+        SELECT id::INTEGER 
+        FROM ways_vertices_pgr 
+        ORDER BY the_geom <-> ST_SetSRID(ST_Point(' || st_x || ', ' || st_y || '), 4326)
+        LIMIT 1' INTO rec;
+    source := rec.id;
+
+    -- Find nearest node to end point
+    EXECUTE '
+        SELECT id::INTEGER 
+        FROM ways_vertices_pgr 
+        ORDER BY the_geom <-> ST_SetSRID(ST_Point(' || end_x || ', ' || end_y || '), 4326)
+        LIMIT 1' INTO rec;
+    target := rec.id;
+
+    -- Build base graph SQL (spatial edges)
+    graph_sql := '
+        SELECT id, source, target, 
+               ST_Length(the_geom) AS cost,
+               NULL::INTERVAL AS time_cost
+        FROM ' || quote_ident(tbl);
+
+    -- Add wormholes if table provided (parallel paths)
+    IF wormholes_table IS NOT NULL THEN
+        graph_sql := graph_sql || '
+        UNION ALL
+        SELECT id, source, target, 
+               0 AS cost,  -- Instantaneous travel
+               NULL::INTERVAL AS time_cost
+        FROM ' || quote_ident(wormholes_table);
+    END IF;
+
+    -- Add time travel edges if table provided (temporal jumps)
+    IF time_nodes_table IS NOT NULL THEN
+        time_travel_sql := '
+        UNION ALL
+        SELECT -id AS id,  -- Negative ID to avoid conflict
+               node AS source,
+               node AS target,  -- Same node (temporal jump)
+               abs_time_cost AS cost,  -- Absolute time jump cost
+               time_jump AS time_cost
+        FROM ' || quote_ident(time_nodes_table);
+
+        graph_sql := graph_sql || time_travel_sql;
+    END IF;
+
+    -- Combine geometry sources for final output
+    geom_sql := '
+        SELECT id, the_geom 
+        FROM ' || quote_ident(tbl);
+
+    IF wormholes_table IS NOT NULL THEN
+        geom_sql := geom_sql || '
+        UNION ALL
+        SELECT id, the_geom
+        FROM ' || quote_ident(wormholes_table);
+    END IF;
+
+    -- Main routing query with time-aware cost
+    sql := '
+        WITH graph AS (' || graph_sql || '),
+        dijkstra AS (
+            SELECT * 
+            FROM pgr_dijkstra(
+                $$SELECT id, source, target, cost FROM graph$$,
+                ' || source || ', ' || target || ', 
+                directed := false
+            )
+        )
+        SELECT d.seq, d.node, d.edge, 
+               g.time_cost AS travel_time,
+               d.cost,
+               COALESCE(geo.the_geom, ST_MakeLine(
+                   (SELECT the_geom FROM ways_vertices_pgr WHERE id = d.node),
+                   (SELECT the_geom FROM ways_vertices_pgr WHERE id = d.node)
+               )) AS geom
+        FROM dijkstra d
+        LEFT JOIN graph g ON d.edge = g.id
+        LEFT JOIN (' || geom_sql || ') geo 
+            ON d.edge = geo.id';
+
+    seq := 0;
+    FOR rec IN EXECUTE sql
+    LOOP
+        seq := seq + 1;
+        node := rec.node;
+        edge := rec.edge;
+        cost := rec.cost;
+        geom := rec.geom;
+        travel_time := rec.travel_time;
+        heading := 0;  -- Simplified for this example
+
+        RETURN NEXT;
+    END LOOP;
+    RETURN;
+END;
+$BODY$
+LANGUAGE plpgsql VOLATILE STRICT;
+```
+
+### Key Features:
+
+1. **Wormholes Support**
+   - Added `wormholes_table` parameter
+   - Wormhole edges have 0 cost (instantaneous travel)
+   - Geometry from wormholes included in route visualization
+
+2. **Time Travel Support**
+   - Added `time_nodes_table` parameter
+   - Temporal jumps at nodes (self-loops)
+   - `time_jump` column specifies temporal displacement (e.g., '-1 day' or '+2 hours')
+   - `abs_time_cost` represents energy/effort for time jump
+
+3. **Output Enhancements**
+   - New `travel_time` output showing temporal displacement
+   - Combines spatial and temporal paths
+   - Handles geometry for both road segments and wormholes
+
+### Required Table Structures:
+
+**Wormholes Table (`wormholes_table`):**
+```sql
+CREATE TABLE wormholes (
+    id SERIAL PRIMARY KEY,
+    source INTEGER REFERENCES ways_vertices_pgr(id),
+    target INTEGER REFERENCES ways_vertices_pgr(id),
+    the_geom GEOMETRY(Linestring, 4326)
+);
+```
+
+**Time Nodes Table (`time_nodes_table`):**
+```sql
+CREATE TABLE time_nodes (
+    id SERIAL PRIMARY KEY,
+    node INTEGER REFERENCES ways_vertices_pgr(id),
+    time_jump INTERVAL,  -- Temporal displacement (e.g., '-1 day')
+    abs_time_cost FLOAT  -- Cost for time jump
+);
+```
+
+### Usage Example:
+```sql
+SELECT * 
+FROM pgr_aDijkstraFromAtoB(
+    'ways', 
+    8.677841, 50.1231,   -- Start (x,y)
+    8.683957, 50.125071, -- End (x,y)
+    'wormholes',         -- Wormholes table
+    'time_nodes'         -- Time travel nodes
+);
+```
+
+This implementation allows:
+- Spatial shortcuts via wormholes (0-cost edges)
+- Temporal jumps at designated nodes
+- Combined spatio-temporal routing
+- Visual output showing both spatial paths and temporal transitions
+
+Note: The time travel functionality requires pre-defined temporal nodes with associated costs. The route will include both spatial movement and temporal jumps in the path sequence.
